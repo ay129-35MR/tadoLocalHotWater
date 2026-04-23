@@ -1,0 +1,25 @@
+[Unit]
+Description=Hot Water Observer (status snapshot for homepage widget)
+Documentation=Observer-only — actuation lives in HA wrappers + ETH01 survival mode
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER                            # ← replace
+Group=YOUR_USER                           # ← replace
+WorkingDirectory=/opt/hot-water-observer  # ← replace with where you put observer.py
+Environment="ESPHOME_IP=192.168.1.X"
+Environment="HA_URL=http://homeassistant.local:8123"
+Environment="HA_TOKEN=REPLACE_WITH_YOUR_LONG_LIVED_HA_TOKEN"
+Environment="STATUS_FILE=/var/lib/hot-water-observer/status.json"
+ExecStart=/usr/bin/python3 /opt/hot-water-observer/observer.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

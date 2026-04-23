@@ -1,0 +1,49 @@
+# tadoLocalHotWater — HA wrapper scripts
+#
+# Append to your scripts.yaml. These are the ONLY safe actuation path —
+# every existing automation that used to toggle switch.t_hot_water_boiler
+# directly should be refactored to call these.
+#
+# Mutex enforcement:
+#   hot_water_on  energises ONLY the selected actuator and forces the other OFF
+#   hot_water_off ALWAYS turns off both paths regardless of selector
+#
+# Adapt the entity IDs to match your install:
+#   switch.t_hot_water_boiler              ← Tado HW switch (Homebridge or native Tado)
+#   switch.hotwatertemp_hot_water_relay    ← ETH01 relay entity (ESPHome auto-prefixes)
+#   input_select.hot_water_actuator        ← actuator selector helper
+
+hot_water_on:
+  alias: "Hot Water ON (routed)"
+  description: "Route hot water ON to the selected actuator. Forces the unused path OFF."
+  sequence:
+    - choose:
+        - conditions:
+            - condition: state
+              entity_id: input_select.hot_water_actuator
+              state: relay
+          sequence:
+            - action: switch.turn_on
+              target:
+                entity_id: switch.hotwatertemp_hot_water_relay
+            - action: switch.turn_off
+              target:
+                entity_id: switch.t_hot_water_boiler
+      default:
+        - action: switch.turn_on
+          target:
+            entity_id: switch.t_hot_water_boiler
+        - action: switch.turn_off
+          target:
+            entity_id: switch.hotwatertemp_hot_water_relay
+
+hot_water_off:
+  alias: "Hot Water OFF (both paths)"
+  description: "Turn off BOTH actuator paths. Always safe to call."
+  sequence:
+    - action: switch.turn_off
+      target:
+        entity_id: switch.t_hot_water_boiler
+    - action: switch.turn_off
+      target:
+        entity_id: switch.hotwatertemp_hot_water_relay

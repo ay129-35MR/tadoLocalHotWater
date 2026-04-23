@@ -1,0 +1,120 @@
+# tadoLocalHotWater — Lovelace dashboard view
+#
+# Drop-in view for HA dashboards. Either:
+#  (a) Edit a dashboard via UI → ⋮ → Edit → ⋮ → Raw editor → paste this view
+#  (b) Use install_lovelace.py in this folder to push it via the WebSocket API
+#
+# Adapt entity IDs if your installation differs from the README's defaults.
+
+title: Hot Water
+path: hot-water
+icon: mdi:water-boiler
+cards:
+  - type: vertical-stack
+    cards:
+      - type: glance
+        title: Status
+        show_state: true
+        columns: 4
+        entities:
+          - entity: sensor.hotwatertemp32
+            name: Tank
+          - entity: input_select.hot_water_actuator
+            name: Actuator
+          - entity: switch.t_hot_water_boiler
+            name: Tado
+          - entity: switch.hotwatertemp_hot_water_relay
+            name: Relay
+
+      - type: glance
+        title: Health
+        show_state: true
+        columns: 4
+        entities:
+          - entity: binary_sensor.hotwatertemp_hot_water_ha_heartbeat_healthy
+            name: HA Heartbeat
+          - entity: binary_sensor.hotwatertemp_hot_water_survival_active
+            name: Survival
+          - entity: binary_sensor.hotwatertemp_hot_water_watchdog_lockout
+            name: Lockout
+          - entity: binary_sensor.hot_water_connectivity
+            name: Tado Zone
+
+      - type: entities
+        title: Tado integration
+        show_header_toggle: false
+        entities:
+          - entity: binary_sensor.ib_internet_bridge_connection_state    # ← rename to your IB device
+            name: IB01 Bridge
+          - entity: binary_sensor.bu_extension_kit_connection_state      # ← rename to your BU device
+            name: BU01 Extension Kit
+          - entity: binary_sensor.hot_water_overlay
+            name: Manual Overlay Active
+          - entity: binary_sensor.hot_water_in_use
+            name: Water In Use
+          - entity: water_heater.hot_water
+            name: Native HW Zone
+
+      - type: entities
+        title: Controls
+        show_header_toggle: false
+        entities:
+          - entity: input_select.hot_water_actuator
+          - entity: input_boolean.hot_water_automation_enabled
+            name: Automations Enabled
+          - entity: input_boolean.hot_water_survival_enabled
+            name: Survival Allowed
+          - entity: input_boolean.hot_water_survival_hold_off
+            name: Survival Hold Off Across Restarts
+          - type: divider
+          - entity: number.hot_water_target_temp
+            name: HA Target
+          - entity: input_number.hot_water_survival_low
+            name: Survival Low
+          - entity: input_number.hot_water_survival_high
+            name: Survival High
+          - entity: input_number.hot_water_max_safe_temp
+            name: Max Safe Temp
+          - entity: input_number.hot_water_max_on_minutes
+            name: Max Continuous ON
+          - type: divider
+          - entity: button.hotwatertemp_hot_water_clear_lockout
+            name: Clear Watchdog Lockout
+          - entity: button.hotwatertemp_restart
+            name: Restart ETH01
+          - type: divider
+          - type: call-service
+            name: Hot Water ON (routed)
+            action_name: Run
+            service: script.hot_water_on
+          - type: call-service
+            name: Hot Water OFF (both paths)
+            action_name: Run
+            service: script.hot_water_off
+
+      - type: glance
+        title: ETH01 effective thresholds
+        show_state: true
+        columns: 3
+        entities:
+          - entity: sensor.hotwatertemp_hot_water_fallback_low
+            name: ETH01 Low
+          - entity: sensor.hotwatertemp_hot_water_fallback_high
+            name: ETH01 High
+          - entity: sensor.hotwatertemp_hot_water_max_safe_temp
+            name: ETH01 Max Safe
+
+      - type: history-graph
+        title: 24h history
+        hours_to_show: 24
+        entities:
+          - entity: sensor.hotwatertemp32
+            name: Tank temp
+          - entity: switch.t_hot_water_boiler
+            name: Tado on
+          - entity: switch.hotwatertemp_hot_water_relay
+            name: Relay on
+          - entity: binary_sensor.hot_water_connectivity
+            name: Tado zone reachable
+          - entity: binary_sensor.hotwatertemp_hot_water_survival_active
+            name: Survival

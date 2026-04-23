@@ -1,0 +1,344 @@
+# tadoLocalHotWater — ETH01 firmware
+#
+# Wired-Ethernet ESP32 (WT32-ETH01) acting as:
+#   1. Hot water tank temperature sensor (DS18B20 in tank port)
+#   2. Parallel relay actuator across Tado BU01's HW-on terminal
+#   3. Local survival thermostat when HA heartbeat goes stale
+#
+# Three operating modes — see project README for the full design.
+#
+# BEFORE FLASHING:
+#   - Replace api.encryption.key  with one generated for your install
+#       (HA: Settings → Devices → ESPHome → ⋯ → Add encryption key)
+#   - Replace ota.password        with your own
+#   - Replace static_ip / gateway / dns with your network
+#   - Optional: change the heartbeat staleness threshold in the lambda below
+#     (default 15 min) and the survival low/high band
+
+esphome:
+  name: hotwatertemp
+  friendly_name: HotWaterTemp
+  platformio_options:
+    board_build.flash_mode: dio
+
+esp32:
+  board: wt32-eth01
+  framework:
+    type: arduino
+
+# WT32-ETH01 v1.4 ethernet
+ethernet:
+  type: LAN8720
+  mdc_pin: GPIO23
+  mdio_pin: GPIO18
+  clk:
+    pin: GPIO0
+    mode: CLK_EXT_IN
+  phy_addr: 1
+  power_pin: GPIO16
+
+  manual_ip:
+    static_ip: 192.168.1.X
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+    dns1: 192.168.1.1
+    dns2: 8.8.8.8
+
+# Local REST + status page (the external watchdog reads /sensor/hotwatertemp32 from this)
+web_server:
+  port: 80
+  local: true
+
+# DS18B20 in the tank's temperature port — single sensor on a one-wire bus
+one_wire:
+  - platform: gpio
+    pin: GPIO4
+
+# ============================================================================
+# GLOBALS — survival thresholds + relay state tracking
+# ============================================================================
+globals:
+  - id: ha_heartbeat_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: survival_enabled
+    type: bool
+    restore_value: yes
+    initial_value: 'true'
+  - id: fallback_low_temp
+    type: float
+    restore_value: yes
+    initial_value: '38.0'
+  - id: fallback_high_temp
+    type: float
+    restore_value: yes
+    initial_value: '46.0'
+  - id: max_safe_temp
+    type: float
+    restore_value: yes
+    initial_value: '65.0'   # MUST be above any legionella target
+  - id: max_on_seconds
+    type: uint32_t
+    restore_value: yes
+    initial_value: '5400'   # 90 min default
+  - id: relay_on_since_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: relay_off_since_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: watchdog_lockout
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+sensor:
+  - platform: dallas_temp
+    name: "hotwatertemp32"
+    id: hotwatertemp32
+    accuracy_decimals: 1
+    update_interval: 30s
+
+  - platform: uptime
+    type: seconds
+    name: "Uptime"
+    id: uptime_sensor
+
+  - platform: template
+    name: "Free Heap"
+    id: free_heap
+    lambda: 'return ESP.getFreeHeap();'
+    update_interval: 60s
+    unit_of_measurement: "bytes"
+    entity_category: diagnostic
+
+  # Effective survival thresholds exposed to HA for visibility
+  - platform: template
+    name: "Hot Water Fallback Low"
+    lambda: 'return id(fallback_low_temp);'
+    update_interval: 60s
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+  - platform: template
+    name: "Hot Water Fallback High"
+    lambda: 'return id(fallback_high_temp);'
+    update_interval: 60s
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+  - platform: template
+    name: "Hot Water Max Safe Temp"
+    lambda: 'return id(max_safe_temp);'
+    update_interval: 60s
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+
+  - platform: debug
+    free:
+      name: "ESP Heap Free"
+    block:
+      name: "ESP Heap Max Block"
+    loop_time:
+      name: "ESP Loop Time"
+
+binary_sensor:
+  - platform: template
+    name: "Hot Water HA Heartbeat Healthy"
+    id: ha_heartbeat_healthy
+    lambda: |-
+      if (id(ha_heartbeat_ms) == 0) return false;
+      return (millis() - id(ha_heartbeat_ms)) < 15UL * 60 * 1000;
+
+  - platform: template
+    name: "Hot Water Survival Active"
+    lambda: |-
+      const bool fresh = (id(ha_heartbeat_ms) != 0) &&
+                         ((millis() - id(ha_heartbeat_ms)) < 15UL * 60 * 1000);
+      return (!fresh) && id(survival_enabled);
+
+  - platform: template
+    name: "Hot Water Watchdog Lockout"
+    lambda: 'return id(watchdog_lockout);'
+
+text_sensor:
+  - platform: debug
+    reset_reason:
+      name: "ESP Reset Reason"
+
+# ============================================================================
+# RELAY — wired in PARALLEL with the Tado BU01's hot water on terminal
+#         (relay COM–NO across the BU01's dry contacts)
+# Either path closing fires the boiler; both must be open to keep it off.
+# ============================================================================
+switch:
+  - platform: gpio
+    pin: GPIO14
+    name: "Hot Water Relay"
+    id: hot_water_relay
+    restore_mode: ALWAYS_OFF   # NEVER on at boot — critical safety default
+    on_turn_on:
+      - lambda: |-
+          id(relay_on_since_ms) = millis();
+          id(relay_off_since_ms) = 0;
+    on_turn_off:
+      - lambda: |-
+          id(relay_off_since_ms) = millis();
+          id(relay_on_since_ms) = 0;
+
+button:
+  - platform: restart
+    name: "Restart"
+    entity_category: config
+  - platform: template
+    name: "Hot Water Clear Lockout"
+    entity_category: config
+    on_press:
+      - lambda: 'id(watchdog_lockout) = false;'
+
+# ============================================================================
+# SAFETY + SURVIVAL LOOP
+# Runs every 30s. Hard safety always on; survival logic only kicks in when
+# HA heartbeat has been stale for ≥15 min.
+# ============================================================================
+interval:
+  - interval: 30s
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const float t = id(hotwatertemp32).state;
+          const bool sensor_bad = isnan(t);
+
+          // ---- HARD SAFETY (always active) ----
+          if (!sensor_bad && t >= id(max_safe_temp)) {
+            if (id(hot_water_relay).state) {
+              ESP_LOGW("hw_safety", "Over-temp %.1f >= %.1f -> OFF + lockout",
+                       t, id(max_safe_temp));
+              id(hot_water_relay).turn_off();
+              id(watchdog_lockout) = true;
+            }
+            return;
+          }
+          if (id(hot_water_relay).state && id(relay_on_since_ms) > 0 &&
+              (now - id(relay_on_since_ms)) / 1000 > id(max_on_seconds)) {
+            ESP_LOGW("hw_safety", "Relay ON > %us -> OFF + lockout", id(max_on_seconds));
+            id(hot_water_relay).turn_off();
+            id(watchdog_lockout) = true;
+            return;
+          }
+          if (sensor_bad && id(hot_water_relay).state) {
+            ESP_LOGW("hw_safety", "Sensor bad -> relay OFF");
+            id(hot_water_relay).turn_off();
+            return;
+          }
+          if (id(watchdog_lockout)) {
+            if (id(hot_water_relay).state) id(hot_water_relay).turn_off();
+            return;
+          }
+
+          // ---- HA health ----
+          const bool heartbeat_fresh = (id(ha_heartbeat_ms) != 0) &&
+                                       ((now - id(ha_heartbeat_ms)) < 15UL * 60 * 1000);
+
+          // Modes 1 & 2: HA drives. Do nothing locally.
+          if (heartbeat_fresh) return;
+
+          // ---- Mode 3: SURVIVAL ----
+          if (!id(survival_enabled)) {
+            if (id(hot_water_relay).state) id(hot_water_relay).turn_off();
+            return;
+          }
+          if (sensor_bad) return;
+
+          const uint32_t SURVIVAL_MIN_OFF_S = 180;     // 3 min anti-chatter
+          const float critical_low = id(fallback_low_temp) - 3.0f;
+
+          if (!id(hot_water_relay).state) {
+            const uint32_t off_for_s = id(relay_off_since_ms) == 0
+                ? SURVIVAL_MIN_OFF_S
+                : (now - id(relay_off_since_ms)) / 1000;
+            const bool critical = (t < critical_low);
+            if (t < id(fallback_low_temp) && (off_for_s >= SURVIVAL_MIN_OFF_S || critical)) {
+              ESP_LOGI("hw_survival", "ON at %.1f < %.1f (crit=%d)",
+                       t, id(fallback_low_temp), (int)critical);
+              id(hot_water_relay).turn_on();
+            }
+          } else {
+            if (t > id(fallback_high_temp)) {
+              ESP_LOGI("hw_survival", "OFF at %.1f > %.1f", t, id(fallback_high_temp));
+              id(hot_water_relay).turn_off();
+            }
+          }
+
+logger:
+  level: WARN
+
+# ============================================================================
+# HA API + services for HA → ETH01 control
+# ============================================================================
+api:
+  encryption:
+    key: "REPLACE_WITH_YOUR_OWN_BASE64_KEY=="
+  reboot_timeout: 0s     # MUST be 0 — survival mode requires the device to keep running when HA disappears
+  services:
+    - service: ha_heartbeat
+      then:
+        - lambda: 'id(ha_heartbeat_ms) = millis();'
+
+    - service: set_survival_config
+      variables:
+        enabled: bool
+        low_temp: float
+        high_temp: float
+        max_temp: float
+        max_on_s: int
+      then:
+        - lambda: |-
+            // Defensive validation — clamp to safe bounds, never reject so survival
+            // always has usable thresholds. Log every coercion.
+            auto finite = [](float v){ return !isnan(v) && !isinf(v); };
+            float lo = finite(low_temp)  ? low_temp  : 38.0f;
+            float hi = finite(high_temp) ? high_temp : 46.0f;
+            float mx = finite(max_temp)  ? max_temp  : 65.0f;
+            int   mo = max_on_s;
+
+            if (lo < 25.0f) lo = 25.0f; if (lo > 55.0f) lo = 55.0f;
+            if (hi < 30.0f) hi = 30.0f; if (hi > 65.0f) hi = 65.0f;
+            if (mx < 50.0f) mx = 50.0f; if (mx > 80.0f) mx = 80.0f;
+            if (mo < 600)   mo = 600;   if (mo > 14400) mo = 14400;
+
+            if (hi <= lo) hi = lo + 2.0f;
+            if (mx <= hi) mx = hi + 2.0f;
+
+            const bool coerced =
+                lo != low_temp || hi != high_temp || mx != max_temp || mo != max_on_s;
+            if (coerced) {
+              ESP_LOGW("hw_cfg",
+                "Clamped survival config: in(low=%.1f high=%.1f max=%.1f max_on=%d) "
+                "-> out(low=%.1f high=%.1f max=%.1f max_on=%d)",
+                low_temp, high_temp, max_temp, max_on_s, lo, hi, mx, mo);
+            }
+
+            id(survival_enabled)   = enabled;
+            id(fallback_low_temp)  = lo;
+            id(fallback_high_temp) = hi;
+            id(max_safe_temp)      = mx;
+            id(max_on_seconds)     = (uint32_t)mo;
+            ESP_LOGI("hw_cfg",
+              "Survival config applied: enabled=%d low=%.1f high=%.1f max=%.1f max_on=%d",
+              (int)enabled, lo, hi, mx, mo);
+
+    - service: clear_watchdog_lockout
+      then:
+        - lambda: 'id(watchdog_lockout) = false;'
+
+ota:
+  - platform: esphome
+    password: "REPLACE_WITH_YOUR_OWN_OTA_PASSWORD"
+
+debug:
+  update_interval: 10s

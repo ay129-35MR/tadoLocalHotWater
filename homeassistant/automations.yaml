@@ -1,0 +1,167 @@
+# tadoLocalHotWater — automations
+#
+# Append to your automations.yaml. These are the NEW automations the system needs.
+# In addition you must REFACTOR your existing hot water automations to call
+# `script.hot_water_on` / `script.hot_water_off` instead of toggling
+# `switch.t_hot_water_boiler` directly. See README "Refactoring existing automations".
+#
+# IMPORTANT: replace `binary_sensor.hot_water_connectivity` if you don't have the
+# native Tado HA integration enabled. With Homebridge alone, the boiler switch
+# never goes "unavailable" so there is no reliable BU01-offline signal — the
+# native integration is required for `hot_water_tado_unavailable_advisory` to fire.
+
+# ---------------------------------------------------------------------------
+# Heartbeat publisher — keeps ETH01 out of survival mode while HA is alive
+# ---------------------------------------------------------------------------
+- id: 'hot_water_ha_heartbeat'
+  alias: Hot Water — Publish Heartbeat to ETH01
+  description: Ping ETH01 every 2 min so it knows HA is alive.
+  triggers:
+  - trigger: time_pattern
+    minutes: "/2"
+  - trigger: homeassistant
+    event: start
+  actions:
+  - action: esphome.hotwatertemp_ha_heartbeat
+    data: {}
+  mode: single
+
+# ---------------------------------------------------------------------------
+# Safe default — re-assert survival ON after every HA restart unless held off
+# ---------------------------------------------------------------------------
+- id: 'hot_water_survival_safe_default_on_start'
+  alias: Hot Water — Ensure Survival Allowed On HA Start
+  description: >-
+    Safe default: survival is ALLOWED after HA restart. Only skipped if
+    input_boolean.hot_water_survival_hold_off is deliberately ON.
+  triggers:
+  - trigger: homeassistant
+    event: start
+  actions:
+  - if:
+    - condition: state
+      entity_id: input_boolean.hot_water_survival_hold_off
+      state: "off"
+    then:
+    - action: input_boolean.turn_on
+      target:
+        entity_id: input_boolean.hot_water_survival_enabled
+  mode: single
+
+# ---------------------------------------------------------------------------
+# Survival config publisher — push coarse fallback thresholds to ETH01
+# ---------------------------------------------------------------------------
+- id: 'hot_water_publish_survival_config'
+  alias: Hot Water — Publish Survival Config to ETH01
+  description: Push coarse fallback thresholds to ETH01 on startup, hourly, and on change.
+  triggers:
+  - trigger: homeassistant
+    event: start
+  - trigger: time_pattern
+    hours: "/1"
+  - trigger: state
+    entity_id:
+    - input_boolean.hot_water_survival_enabled
+    - input_number.hot_water_survival_low
+    - input_number.hot_water_survival_high
+    - input_number.hot_water_max_safe_temp
+    - input_number.hot_water_max_on_minutes
+  actions:
+  - action: esphome.hotwatertemp_set_survival_config
+    data:
+      enabled: "{{ is_state('input_boolean.hot_water_survival_enabled', 'on') }}"
+      low_temp: "{{ states('input_number.hot_water_survival_low') | float(38) }}"
+      high_temp: "{{ states('input_number.hot_water_survival_high') | float(46) }}"
+      max_temp: "{{ states('input_number.hot_water_max_safe_temp') | float(65) }}"
+      max_on_s: "{{ (states('input_number.hot_water_max_on_minutes') | int(90)) * 60 }}"
+  mode: single
+
+# ---------------------------------------------------------------------------
+# Tado offline advisory — manual switch suggestion (no auto-flip in v1)
+# ---------------------------------------------------------------------------
+- id: 'hot_water_tado_unavailable_advisory'
+  alias: Hot Water — Advise Switching Actuator to Relay
+  description: >-
+    Advisory only — does NOT auto-flip the actuator. Fires when the Tado
+    hot-water zone has been unreachable for 3+ min while we're still
+    selecting Tado as the actuator. Requires the native Tado HA integration.
+  triggers:
+  - trigger: state
+    entity_id: binary_sensor.hot_water_connectivity
+    to: "off"
+    for: "00:03:00"
+  conditions:
+  - condition: state
+    entity_id: input_select.hot_water_actuator
+    state: tado
+  actions:
+  - action: notify.mobile_app_iphone   # ← change to your notification target
+    data:
+      title: "Hot Water"
+      message: "Tado hot-water zone unreachable for 3+ min. Consider switching actuator to relay."
+  - action: logbook.log
+    data:
+      name: Hot Water
+      message: "Hot water zone disconnected — manual actuator switch recommended"
+      entity_id: binary_sensor.hot_water_connectivity
+  mode: single
+
+# ---------------------------------------------------------------------------
+# Unmanaged scenario warning — survival mode active AND Tado firing in parallel
+# ---------------------------------------------------------------------------
+- id: 'hot_water_unmanaged_scenario_warning'
+  alias: Hot Water — Unmanaged Scenario (survival + Tado active)
+  description: >-
+    Warns when ETH01 is in survival mode AND Tado is firing the boiler in
+    parallel. ETH01 can only shut its own relay — it has no way to stop Tado.
+    Tank can overheat past max_safe_temp before anything intervenes.
+
+    Only fires when HA itself is alive but the heartbeat to ETH01 is broken.
+    If HA is fully down, this automation cannot fire — that case needs the
+    external watchdog (see watchdog/ folder in this repo).
+  triggers:
+  - trigger: template
+    value_template: >-
+      {{ is_state('binary_sensor.hotwatertemp_hot_water_survival_active', 'on')
+         and is_state('switch.t_hot_water_boiler', 'on') }}
+    for: "00:02:00"
+  actions:
+  - action: notify.mobile_app_iphone   # ← change to your notification target
+    data:
+      title: "HOT WATER UNMANAGED"
+      message: >-
+        ETH01 in survival mode while Tado is firing boiler in parallel.
+        ETH01 cannot stop Tado. Investigate HA→ETH01 heartbeat or
+        switch actuator off via Tado app.
+      data:
+        push:
+          sound:
+            name: default
+            critical: 1
+            volume: 1.0
+          interruption-level: critical
+  - action: logbook.log
+    data:
+      name: Hot Water
+      message: "UNMANAGED: survival mode active AND Tado firing boiler — investigate immediately"
+      entity_id: binary_sensor.hotwatertemp_hot_water_survival_active
+  mode: single
+
+# ---------------------------------------------------------------------------
+# REFACTORING TEMPLATE — apply this pattern to every existing automation that
+# currently turns switch.t_hot_water_boiler on/off directly.
+#
+# BEFORE:
+#   actions:
+#     - action: switch.turn_on
+#       target:
+#         entity_id: switch.t_hot_water_boiler
+#
+# AFTER:
+#   actions:
+#     - action: script.hot_water_on
+#
+# Same for OFF — replace direct switch.turn_off with script.hot_water_off.
+# Trip-catch / target-change / overlay-restart automations don't need changes
+# if they trigger the on/off automations themselves.
+# ---------------------------------------------------------------------------
