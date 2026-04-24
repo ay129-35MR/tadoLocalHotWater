@@ -10,7 +10,19 @@
 A small, low-cost project that gives a Tado-controlled hot water system three layers of fallback so the tank doesn't go cold when **Tado's BU01**, **Tado's cloud**, **Home Assistant**, or **the network** drops. Companion project to [tadoHotWaterKnob](https://github.com/ay129-35MR/tadoHotWaterKnob) — same household, complementary problem.
 
 <p align="center">
-  <em>(images placeholder — to be added by author)</em>
+  <img src="images/01-enclosure-overview.png" alt="Annotated enclosure: ESP32 + relay + Hi-Link AC-DC + DS18B20, with AC input, ethernet out, relay control (logic), and relay output (to Tado Z) labelled" width="420">
+</p>
+
+<p align="center">
+  <img src="images/02-relay-module.jpg" alt="Isolated drive control module — single-channel Songle SRD-03VDC-SL-C relay board with COM/NO/NC screw terminals and VCC/GND/IN logic input" width="520">
+  <br>
+  <em>The single-channel isolated relay that sits in parallel with the BU01's HW-on dry contacts.</em>
+</p>
+
+<p align="center">
+  <img src="images/03-relay-vs-bu01.jpeg" alt="Relay module laid next to the Tado BU01 extension kit showing the Switched Live / Relay Wiring 2 terminal diagram on the inside of the backplate" width="520">
+  <br>
+  <em>Relay next to the Tado BU01 — COM ↔ NO wired across the same HW-on pair the BU01 already drives.</em>
 </p>
 
 ---
@@ -252,7 +264,9 @@ tadoLocalHotWater/
 ├── docs/
 │   └── (additional notes)
 └── images/
-    └── (placeholder — add your own photos and screenshots)
+    ├── 01-enclosure-overview.png     # Annotated enclosure build
+    ├── 02-relay-module.jpg           # The isolated relay module used
+    └── 03-relay-vs-bu01.jpeg         # Relay beside BU01 showing HW-on pair
 ```
 
 ---
