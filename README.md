@@ -118,10 +118,65 @@ There is **no software arbitration at the hardware layer** — that's deliberate
 
 ### Wiring — the ETH01
 
-- **DS18B20** sits in the tank's temperature pocket. Yellow → GPIO4, red → 3.3V, black → GND, with the standard 4.7 kΩ pull-up between data and 3.3 V.
+- **DS18B20** — see the dedicated section below.
 - **Relay control input** wired to GPIO14 (avoids strapping pins).
 - **Ethernet** uses the WT32-ETH01's onboard LAN8720 (GPIO0/16/18/23). No Wi-Fi configured.
 - Power the ETH01 from the same circuit as the BU01 if practical — they share a failure mode either way.
+
+### Tank temperature — the DS18B20 (the ESP's eye on the cylinder)
+
+The whole safety and survival layer rests on knowing the actual tank temperature independently of Tado. The DS18B20 is the cheapest possible way to get that: a single-wire digital sensor, factory-calibrated to ±0.5 °C across the useful domestic hot-water range (−10 to +85 °C), immune to the analog drift that plagues thermistors, and readable directly by ESPHome with no maths on the ESP side.
+
+Three specific jobs it does:
+
+1. **Hard safety** — ETH01 trips the relay OFF + lockout if it reads ≥ `max_safe_temp` (default 65 °C). Works in all three modes regardless of who's driving the boiler.
+2. **Survival thermostat** — in Mode 3, the ETH01's 30-second interval loop compares tank temp to the `fallback_low` / `fallback_high` band (default 38 / 46 °C) and cycles the relay with 3-minute anti-chatter.
+3. **Observability** — publishes `sensor.hotwatertemp_hot_water_tank_temperature` to HA, so every automation, dashboard card, and the external watchdog can see the same ground-truth reading.
+
+**Form factor.** Use the **stainless-steel probe version** on ~1 m of 3-core cable, not the bare TO-92 package. Domestic cylinders have a temperature-sensor pocket on the side (the Tado kit or an immersion thermostat usually occupies the primary one — secondary pockets are common). The probe slides straight in; the stainless sleeve is fine with the tank temperatures involved. Don't strap it to the outside of a lagged tank — you'll read the jacket, not the water, and the survival band will misbehave.
+
+**Bus mode — external power, not parasitic.** Run the sensor in **3-wire mode** (VDD, DQ, GND — all three cores used). Parasitic mode (2-wire, VDD tied to GND at the sensor) is supported by the chip and tempting for retrofit, but it's measurably slower, flakier on long cables, and offers no real benefit here — you already have three conductors in the cable you're running. External-power mode is what ESPHome's `one_wire` platform assumes by default.
+
+**The 4.7 kΩ pull-up.** Required on the data line. The DS18B20 drives DQ low to signal; between transactions DQ must be pulled high to VDD through a 4.7 kΩ resistor. Many probe modules come with this pre-installed on a tiny carrier PCB at the ESP end — if yours doesn't, solder one between GPIO4 and 3.3 V at the ETH01 (not at the tank end). Without it you get `nan` readings and the ESP will cut power out of safety (`sensor bad → OFF`, see "Hard safety" above).
+
+**Wiring (colour conventions vary — check your cable):**
+
+| DS18B20 pin | Typical colour | WT32-ETH01 |
+|---|---|---|
+| VDD | Red | **3.3 V** |
+| GND | Black | **GND** |
+| DQ (data) | Yellow (or white) | **GPIO4**, with a 4.7 kΩ pull-up to 3.3 V |
+
+```
+    ┌──────────────┐                  ┌───────────────┐
+    │  DS18B20     │                  │  WT32-ETH01   │
+    │  (in pocket) │                  │               │
+    │              │     VDD (red) ───┤ 3.3 V         │
+    │              │     GND (blk) ───┤ GND           │
+    │              │     DQ  (yel) ───┼─ GPIO4        │
+    │              │                  │    │          │
+    └──────────────┘                  │    └── 4.7 kΩ │
+                                      │        │       │
+                                      │       3.3 V    │
+                                      └───────────────┘
+```
+
+**ESPHome config (already in `esphome/hotwatertemp.yaml`):**
+```yaml
+one_wire:
+  - platform: gpio
+    pin: GPIO4
+
+sensor:
+  - platform: dallas_temp
+    name: "Hot Water Tank Temperature"
+    id: hotwatertemp32
+    update_interval: 30s
+```
+
+**Why not a thermistor / NTC?** The DS18B20 ships pre-calibrated, is a drop-in digital reading, and doesn't need an ADC channel (which on ESP32 has its own Wi-Fi-related quirks). For ~£2 it removes an entire analog calibration dance.
+
+**Multi-sensor note.** The `one_wire` bus supports many DS18B20s on the same pair. If you also want to read flow-pipe temperature or a secondary tank point, add more `platform: dallas_temp` entries with unique `address:` values. For v1 we only use one.
 
 ### Pinout (WT32-ETH01)
 
