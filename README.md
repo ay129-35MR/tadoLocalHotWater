@@ -83,6 +83,24 @@ Three things were needed without ripping out Tado:
 
 The actuation side is intentionally simple: a single relay wired in parallel with the BU01's hot water output. Either device closing fires the burner; both must be open for the boiler to stay off. The intelligence is all in software.
 
+### Where this build started — the sensor-only predecessor
+
+Before the relay path existed, the same enclosure was built out as a **read-only** ESPHome node: just a WT32-ETH01, a 5 V supply, and a DS18B20 probe dropped into the tank's temperature pocket. Its only job was to publish tank temperature into Home Assistant so we could see what Tado was *actually* doing to the cylinder — a trust-but-verify layer on top of the cloud integration, and the companion to [tadoHotWaterKnob](https://github.com/ay129-35MR/tadoHotWaterKnob).
+
+That earlier build is what the v1 you're looking at grew out of: same enclosure, same ESP32, same probe, same wiring for rows 9–11 of the connections table below. All that was added was a relay module and the cable run from COM/NO to the BU01. If you're retrofitting an existing sensor-only install, you already have 80 % of the hardware and most of the cable routing work done.
+
+<p align="center">
+  <img src="images/00a-predecessor-open.jpg" alt="The original sensor-only enclosure, open, showing the WT32-ETH01 dev board, 5 V supply, and DS18B20 probe on a long cable — no relay module yet" width="420">
+  <br>
+  <em>v0 — sensor-only. Same enclosure, ETH01, probe. No relay yet.</em>
+</p>
+
+<p align="center">
+  <img src="images/00b-predecessor-closed.jpg" alt="The closed v0 sensor-only enclosure with the DS18B20 probe cable exiting to be placed in the tank pocket" width="360">
+  <br>
+  <em>v0 closed and deployed — feeds tank temperature into HA only.</em>
+</p>
+
 ### Parts List
 
 | Part | Cost | Notes |
@@ -188,6 +206,44 @@ sensor:
 | Ethernet MDIO | GPIO18 | LAN8720 reserved. |
 | Ethernet CLK_EXT_IN | GPIO0 | LAN8720 reserved. |
 | Ethernet PHY power | GPIO16 | LAN8720 reserved. |
+
+### All connections — full wiring table
+
+Every conductor in the build, end-to-end. Use this as a tick-list when you're at the boiler with a screwdriver.
+
+| # | From (device · terminal) | To (device · terminal) | Conductor | Purpose / notes |
+|---|---|---|---|---|
+| 1 | Mains consumer unit · Live (230 V AC) | Hi-Link HLK-PM01 AC-DC module · L (AC IN) | Brown (live) | Powers the 5 V rail. Spur off the same circuit as the BU01 if practical. |
+| 2 | Mains consumer unit · Neutral | Hi-Link HLK-PM01 · N (AC IN) | Blue (neutral) | Same spur as above. |
+| 3 | Mains consumer unit · Earth | Enclosure earth stud / DIN rail | Green-yellow | Earth the metal enclosure if metallic. PSU is double-insulated, no earth required on the PSU itself. |
+| 4 | Hi-Link HLK-PM01 · +5 V | WT32-ETH01 · 5 V | Red | ESP32 + Ethernet PHY power. |
+| 5 | Hi-Link HLK-PM01 · GND | WT32-ETH01 · GND | Black | Common ground with everything else on the ESP side. |
+| 6 | WT32-ETH01 · 3.3 V | Relay module · VCC | Red (flyable) | Relay coil driver rail (isolated board, 3.3 V logic side). |
+| 7 | WT32-ETH01 · GND | Relay module · GND | Black | Logic-side ground. |
+| 8 | WT32-ETH01 · GPIO14 | Relay module · IN | Yellow / signal | Active-HIGH trigger. `restore_mode: ALWAYS_OFF`. |
+| 9 | WT32-ETH01 · 3.3 V | DS18B20 probe · VDD (red) | Red | 3-wire / external-power mode. |
+| 10 | WT32-ETH01 · GND | DS18B20 probe · GND (black) | Black | Sensor ground. |
+| 11 | WT32-ETH01 · GPIO4 | DS18B20 probe · DQ (yellow) | Yellow / data | One-wire data line. **Fit 4.7 kΩ pull-up between GPIO4 and 3.3 V at the ESP end.** |
+| 12 | Relay module · COM | Tado BU01 · HW-on terminal A (matches BU01's existing HW dry pair) | 3-core cable core 1 | The wire landing on the *same* BU01 screw as the existing HW call wire. |
+| 13 | Relay module · NO | Tado BU01 · HW-on terminal B | 3-core cable core 2 | Lands on the other HW dry terminal. Either path (BU01 or relay) closing the COM↔NO pair fires the burner. |
+| 14 | — | — | 3-core cable core 3 (GND) | Reserved / spare. If you want to guarantee relay-side galvanic isolation from the boiler side, leave unconnected. Not required for operation. |
+| 15 | WT32-ETH01 · RJ45 jack | Router / switch · LAN port | Cat-5e/6 Ethernet patch | 100 Mb. Full LAN — no DHCP tricks required; a static IP is nice-to-have. |
+
+Notes:
+- The "3-core cable" in rows 12–14 is the run **from the relay (inside the ETH01 enclosure) down to the boiler's BU01 backplate**. Use proper multi-core flex, not single-core doorbell wire.
+- Rows 12 and 13 are electrically in parallel with the BU01's own internal HW-on contact — *that is the whole point*. You are adding a second path across the same pair; you are not cutting anything.
+- Rows 4 and 5 are what you get from the Hi-Link module. If you use a USB 5 V adapter instead, the polarity is the same: VBUS to 5 V, GND to GND.
+- The DS18B20 probe cable (rows 9–11) runs from the ETH01 enclosure to the cylinder's temperature pocket. 1 m is usually plenty; longer runs may need the pull-up lowered slightly (2.2 kΩ) for signal integrity, but 4.7 kΩ is correct for the ≤ 3 m the typical install needs.
+
+### Summary
+
+- **Two 230 V wires in** (L, N) to a Hi-Link PSU → **5 V out** to the ETH01.
+- **Three wires** from ETH01 to the relay module (3.3 V, GND, GPIO14 signal).
+- **Three wires** from ETH01 to the DS18B20 probe (3.3 V, GND, GPIO4 data + **4.7 kΩ pull-up to 3.3 V**).
+- **Two wires** from the relay's COM/NO terminals to the BU01's existing HW-on pair — **in parallel**, not in series. Either path fires the boiler; both must open to keep it off.
+- **One Ethernet patch** from the ETH01's RJ45 to your LAN. No Wi-Fi.
+
+Total wires landed at the BU01: **two**. Total wires landed at the ETH01: **eight** (2 × power in, 3 × relay, 3 × sensor). Total serviceable parts: **four** (Hi-Link, ETH01, relay module, DS18B20 probe).
 
 ### Why a wired ESP for the safety role?
 
@@ -319,7 +375,9 @@ tadoLocalHotWater/
 ├── docs/
 │   └── (additional notes)
 └── images/
-    ├── 01-enclosure-overview.png     # Annotated enclosure build
+    ├── 00a-predecessor-open.jpg      # v0 sensor-only build, enclosure open
+    ├── 00b-predecessor-closed.jpg    # v0 sensor-only build, closed & deployed
+    ├── 01-enclosure-overview.png     # Annotated v1 enclosure build
     ├── 02-relay-module.jpg           # The isolated relay module used
     └── 03-relay-vs-bu01.jpeg         # Relay beside BU01 showing HW-on pair
 ```
