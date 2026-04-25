@@ -1,4 +1,4 @@
-# tadoLocalHotWater — HA wrapper scripts
+# tadoLocalHotWater — HA wrapper scripts (v1.1)
 #
 # Append to your scripts.yaml. These are the ONLY safe actuation path —
 # every existing automation that used to toggle switch.t_hot_water_boiler
@@ -8,15 +8,60 @@
 #   hot_water_on  energises ONLY the selected actuator and forces the other OFF
 #   hot_water_off ALWAYS turns off both paths regardless of selector
 #
-# Adapt the entity IDs to match your install:
-#   switch.t_hot_water_boiler              ← Tado HW switch (Homebridge or native Tado)
+# v1.1 adds a pre-flight check to hot_water_on: if actuator=tado but
+# switch.t_hot_water_boiler is unavailable at the moment of heat demand,
+# the script flips the selector to relay, notifies you, and then fires the
+# relay. This prevents a silent-failure where HA sends ON to a dead Homebridge
+# path and the tank cools unattended. Flip the selector back manually after
+# Homebridge recovers.
+#
+# Adapt entity IDs to match your install:
+#   switch.t_hot_water_boiler              ← Homebridge HW switch (homekit_controller)
 #   switch.hotwatertemp_hot_water_relay    ← ETH01 relay entity (ESPHome auto-prefixes)
 #   input_select.hot_water_actuator        ← actuator selector helper
 
 hot_water_on:
   alias: "Hot Water ON (routed)"
-  description: "Route hot water ON to the selected actuator. Forces the unused path OFF."
+  description: >-
+    Route hot water ON to the selected actuator (Homebridge or relay).
+    Ensures the unused path is OFF. Pre-flight: if actuator=tado but the
+    Homebridge-bridged switch is unavailable, flip the selector to relay
+    BEFORE firing — prevents silent-failure where HA sends ON to a dead path
+    and the tank cools unattended.
   sequence:
+    # ---- Pre-flight: catch dead Homebridge link at moment of heat demand ----
+    - choose:
+        - conditions:
+            - condition: state
+              entity_id: input_select.hot_water_actuator
+              state: tado
+            - condition: state
+              entity_id: switch.t_hot_water_boiler
+              state: "unavailable"
+          sequence:
+            - action: logbook.log
+              data:
+                name: Hot Water
+                message: >-
+                  PRE-FLIGHT FLIP: heat demanded but Homebridge boiler switch
+                  unavailable — routing via relay instead.
+                entity_id: input_select.hot_water_actuator
+            - action: input_select.select_option
+              target:
+                entity_id: input_select.hot_water_actuator
+              data:
+                option: relay
+            - action: notify.mobile_app_iphone   # ← change to your notification target
+              data:
+                title: "HOT WATER — Pre-flight flip to relay"
+                message: >-
+                  Homebridge boiler switch was unavailable at moment of heat demand
+                  — flipped to relay to avoid silent failure. Flip back manually
+                  after Homebridge recovers.
+                data:
+                  push:
+                    interruption-level: passive
+    # ---- Route to selected actuator ----
     - choose:
         - conditions:
             - condition: state
@@ -29,6 +74,7 @@ hot_water_on:
             - action: switch.turn_off
               target:
                 entity_id: switch.t_hot_water_boiler
+              continue_on_error: true
       default:
         - action: switch.turn_on
           target:
