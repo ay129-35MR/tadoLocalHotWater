@@ -1,4 +1,4 @@
-# tadoLocalHotWater (v1.0)
+# tadoLocalHotWater (v1.1)
 ## Local Hot Water Independence + Resilience for Tado-Controlled Hot Water
 
 [![ESPHome](https://img.shields.io/badge/ESPHome-2025-blue?logo=esphome)](https://esphome.io/)
@@ -39,7 +39,7 @@ This project is a small bet against that. It puts a **wired, local, vendor-neutr
 - Decisions are made by [Home Assistant](https://www.home-assistant.io/) — open source, runs on your hardware, no cloud dependency.
 - If even Home Assistant goes dark, the ESP32 itself takes over with a tiny survival thermostat — keeping the water usable until you get back to fix things.
 
-Tado keeps doing what it does well — comfort, scheduling, schedules, app polish, schedules again. We just refuse to let it be the *only* path. If Tado vanishes tomorrow the way Nest did in 2019, the boiler still fires, the water still heats, and the only thing you lose is the app.
+Tado keeps doing what it does well — comfort, scheduling, app polish. We just refuse to let it be the *only* path. If Tado vanishes tomorrow the way Nest did in 2019, the boiler still fires, the water still heats, and the only thing you lose is the app.
 
 This is **cable-cutting for your boiler**: not a replacement for the cloud product you've already paid for, but a guarantee that your hot water survives its disappearance.
 
@@ -52,7 +52,7 @@ The hot water side of a Tado X system has a single point of failure: the **BU01*
 Three things were needed without ripping out Tado:
 
 1. **Independence** — a parallel actuator that can fire the boiler without Tado being involved.
-2. **Backup brain** — Home Assistant can drive either path; if Tado integration fails, HA still has hands.
+2. **Backup brain** — Home Assistant can drive either path; if one path fails, HA still has hands.
 3. **Survival** — if HA itself dies, *something* keeps the tank warm enough to use.
 
 …all without ever creating two writers fighting over the same boiler call.
@@ -65,7 +65,7 @@ Three things were needed without ripping out Tado:
 
 | Mode | When | Brain | Actuator | What ETH01 is doing |
 |------|------|-------|----------|---------------------|
-| **🟢 1 — Normal** | HA alive AND Tado alive AND `actuator = tado` | HA automations | **Tado BU01** (`switch.t_hot_water_boiler`) | sensing tank temp + hard safety only |
+| **🟢 1 — Normal** | HA alive AND Homebridge alive AND `actuator = tado` | HA automations | **Homebridge switch** (`switch.t_hot_water_boiler`) | sensing tank temp + hard safety only |
 | **🟡 2 — Relay** | HA alive but `actuator = relay` (you flipped it) | HA automations | **ETH01 relay** (`switch.hotwatertemp_hot_water_relay`) | sensing tank temp + hard safety only |
 | **🔴 3 — Survival** | HA heartbeat to ETH01 stale ≥ 15 min | **ETH01 alone** | **ETH01 relay** | tiny local fallback thermostat |
 
@@ -73,7 +73,7 @@ Three things were needed without ripping out Tado:
 
 **Mode switching:**
 
-- 🟢 Mode 1 ⇄ 🟡 Mode 2 is a **manual flip** of `input_select.hot_water_actuator`. v1 is intentionally manual — automatic actuator failover is a debugging nightmare when it triggers unexpectedly. The `hot_water_tado_unavailable_advisory` automation suggests when to flip; you decide.
+- 🟢 Mode 1 ⇄ 🟡 Mode 2 is a **manual flip** of `input_select.hot_water_actuator`. v1 is intentionally manual — automatic actuator failover is a debugging nightmare when it triggers unexpectedly. The `hot_water_on` script does include a pre-flight check (v1.1): if you're set to `tado` but `switch.t_hot_water_boiler` is `unavailable` at the moment of heat demand, it auto-flips to relay and notifies you. You flip back manually when Homebridge recovers.
 - 🟢 / 🟡 → 🔴 Mode 3 happens **automatically** — the ETH01 watches its own heartbeat freshness. No HA cooperation required.
 - 🔴 → 🟢 / 🟡 happens **automatically** the moment the heartbeat returns.
 
@@ -148,7 +148,7 @@ The whole safety and survival layer rests on knowing the actual tank temperature
 Three specific jobs it does:
 
 1. **Hard safety** — ETH01 trips the relay OFF + lockout if it reads ≥ `max_safe_temp` (default 65 °C). Works in all three modes regardless of who's driving the boiler.
-2. **Survival thermostat** — in Mode 3, the ETH01's 30-second interval loop compares tank temp to the `fallback_low` / `fallback_high` band (default 38 / 46 °C) and cycles the relay with 3-minute anti-chatter.
+2. **Survival thermostat** — in Mode 3, the ETH01's 30-second interval loop compares tank temp to the survival band and cycles the relay with 3-minute anti-chatter.
 3. **Observability** — publishes `sensor.hotwatertemp_hot_water_tank_temperature` to HA, so every automation, dashboard card, and the external watchdog can see the same ground-truth reading.
 
 **Form factor.** Use the **stainless-steel probe version** on ~1 m of 3-core cable, not the bare TO-92 package. Domestic cylinders have a temperature-sensor pocket on the side (the Tado kit or an immersion thermostat usually occupies the primary one — secondary pockets are common). The probe slides straight in; the stainless sleeve is fine with the tank temperatures involved. Don't strap it to the outside of a lagged tank — you'll read the jacket, not the water, and the survival band will misbehave.
@@ -257,6 +257,7 @@ Wi-Fi is the most common failure mode on hobbyist ESPHome devices. Putting the s
 
 ```yaml
 hot_water_on:
+  pre-flight: if actuator=tado and switch unavailable → flip to relay + notify
   if actuator == relay: relay ON, force Tado switch OFF
   else:                 Tado ON, force relay OFF
 
@@ -268,6 +269,8 @@ hot_water_off:
 Every existing HA automation (turn-on, turn-off fail-safe, trip-catch, schedule, derate-overnight, towel-rail handler, iOS critical-alert action) is **minimally refactored** to call these scripts instead of toggling `switch.t_hot_water_boiler` directly. Roughly 5 line edits, no actual logic redesign — the wrappers become the single mux point for the entire control surface.
 
 **The trade-off**: anything that bypasses the wrapper (Tado's own schedule, the Tado app, a stray `switch.turn_on` somewhere) can briefly desynchronise the two paths. HA's fail-safe off-cycle and the ETH01's max-on-time ultimately bound the damage — but discipline matters.
+
+> **Critical detail (v1.1 bug fix):** The Turn-Off Fail-Safe condition must check **both** actuator paths, not just the Tado/Homebridge one. The original v1.0 predicate only checked `switch.t_hot_water_boiler`. When `actuator = relay`, that switch is forced OFF, so the predicate never passed — the relay ran until the ETH01's own `max_on_seconds` watchdog tripped it (90 min later). Three lockouts in 48 h were caused by this single oversight. The fix: OR both switches in the condition.
 
 ---
 
@@ -281,24 +284,78 @@ Home Assistant publishes a **heartbeat** to the ETH01 every 2 minutes via an ESP
     - lambda: 'id(ha_heartbeat_ms) = millis();'
 ```
 
-…and a small set of **broad fallback thresholds** via a second service, every hour and on change:
+…and the ETH01's **survival band** via a second service, every hour and on change. As of v1.1, these thresholds are **auto-derived from your target temp** (`input_number.target_temp`) rather than stored in separate helpers:
 
-- `fallback_low_temp` (default 38 °C)
-- `fallback_high_temp` (default 46 °C)
-- `max_safe_temp` (default 65 °C — must be above any legionella target)
-- `max_on_seconds` (default 90 min)
+```yaml
+low_temp:  "{{ [target - 8, 38] | max }}"   # floor never drops below 38 °C
+high_temp: "{{ target }}"                    # survive to your actual setpoint
+max_safe_temp: 65 °C                         # hard ceiling (firmware-enforced)
+max_on_seconds: 90 min                       # watchdog trip time
+```
+
+This means if you derate overnight to 38 °C, the survival band narrows automatically — no separate survival helpers to keep in sync.
 
 When the heartbeat goes stale (>15 min on the ETH01's own clock), the device's interval lambda kicks in:
 
 - below `fallback_low` → relay ON (with 3-min anti-chatter)
 - above `fallback_high` → relay OFF
-- temp ≥ `max_safe_temp` → OFF + lockout (manual clear from HA)
+- temp ≥ `max_safe_temp` → OFF + lockout (manual clear from HA or ETH01 web UI)
 - relay on > `max_on_seconds` → OFF + lockout
 - sensor invalid → OFF (no lockout, auto-resumes)
 
 It deliberately **does not try to be smart**. No occupancy, no schedules, no usage-rate logic. Just keep the water usable until HA comes back.
 
+**Killswitch gates survival (v1.1):** If you turn off `input_boolean.hot_water_automation_enabled` (the master killswitch — used when leaving the house for several days), the survival config published to the ETH01 has `enabled: false`. This means HA rebooting during your absence won't leave the ETH01 autonomously cycling the relay when you intended heating to be off.
+
 The thresholds get clamped defensively on the ESP — if HA pushes a config where `low > high`, the lambda coerces it to a sane band rather than rejecting outright. Survival logic always has *some* usable threshold pair.
+
+---
+
+## ETH01 web UI — bidirectional controls (v1.1)
+
+The ETH01 runs a lightweight web server (`web_server: port 80`). In v1.0, this was read-only: you could see sensor readings and relay state, but couldn't change anything from the browser.
+
+**v1.1 adds three writable controls with full bidirectional sync:**
+
+| Control | Range | HA counterpart | Notes |
+|---------|-------|----------------|-------|
+| **Target Temp** | 40–65 °C | `input_number.target_temp` | Changing either end propagates to the other |
+| **Automations Enabled** | on / off | `input_boolean.hot_water_automation_enabled` | Toggle on ETH01 UI flips the HA helper and vice versa |
+| **Survival Allowed** | on / off | `input_boolean.hot_water_survival_enabled` | Enable/disable ETH01 survival mode independently |
+
+Each control uses a **suppress-flag pattern** to prevent echo loops:
+
+```yaml
+# HA → ETH01: subscriber sets suppress flag before mirroring the new value
+- platform: homeassistant
+  entity_id: input_number.target_temp
+  on_value:
+    then:
+      - lambda: |-
+          id(suppress_target_push) = true;
+          auto call = id(target_temp_local).make_call();
+          call.set_value(x);
+          call.perform();
+          id(suppress_target_push) = false;
+
+# ETH01 → HA: on_value only fires back to HA if suppress is false
+number:
+  - platform: template
+    id: target_temp_local
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(suppress_target_push);'
+            then:
+              - homeassistant.service:
+                  service: input_number.set_value
+                  data:
+                    entity_id: input_number.target_temp
+                    value: !lambda 'return x;'
+```
+
+The ETH01 web UI is accessible at `http://<static-ip>/` — no app, no cloud, no account. In an emergency (HA down, Homebridge down), you can still reach the device directly from any browser on your LAN, read the tank temperature, see relay state, and adjust the target or toggle survival mode.
 
 ---
 
@@ -325,29 +382,27 @@ The watchdog is intentionally simple Python so you can host it on whatever you a
 | **A cron job on a router with entware/openWRT** | Independent power domain, different uptime profile. | Limited Python availability, awkward to update. |
 | **A free-tier VPS or a friend's home Pi over Tailscale** | True off-site independence — survives a power cut at your house. | Now you depend on internet round-trip and a third party for the safety alert. |
 
-The reference deployment in this repo runs it as a background thread inside an existing Flask app on a Linux box — about a 5-line addition to `app.py`. But there's nothing magic about that — `python3 watchdog/watchdog.py` works as a standalone process, and `watchdog/` includes a `start()` entrypoint you can import into any existing always-on Python process.
-
 The principle to optimise for: **the watchdog should fail in a different way than HA fails.** Different machine is good. Different power supply is better. Different physical location is best. But all of them are dramatically better than nothing.
 
 ---
 
-## Detecting BU01 offline
+## The native Tado HA integration — why it's excluded from v1.1
 
-Took some figuring out:
+The original v1.0 README recommended **re-enabling the native Tado HA integration** alongside Homebridge to get `binary_sensor.hot_water_connectivity` — the only reliable signal that the BU01 was unreachable end-to-end. **v1.1 removes this recommendation entirely.**
 
-- The Tado switch in many HA installs goes through a **Homebridge plugin** (cloud API + HomeKit). When the BU01 dies, that plugin keeps reporting the cached `off` rather than `unavailable` — so it can't be used for failure detection.
-- **Re-enable the native Tado HA integration** alongside Homebridge. Its `binary_sensor.hot_water_connectivity` is the real "Tado HW zone reachable end-to-end" sensor. When the BU01 dies, that flips to `off` within seconds.
+Here's what happened in practice:
 
-Heads-up if you do this: the native Tado HA integration uses **OAuth 2.0 Device Authorization** since March 2025. The auth flow generates a fresh `user_code` every retry. Only approve the **currently visible** code — don't re-click Configure after approving, or you invalidate what you just approved.
+1. The native Tado HA integration uses **OAuth 2.0 Device Authorization** (since March 2025). Tokens expire without prominent warning. Re-auth requires approving a code in the HA UI; if this slips past you, `binary_sensor.hot_water_connectivity` goes stale and the advisory automations start firing on wrong data.
+2. Two separate incidents resulted in cold water because the advisory automation had made routing decisions based on a broken sensor — the integration was unhealthy, but the automation didn't know that.
+3. Homebridge (`platform: homekit_controller`) had been driving `switch.t_hot_water_boiler` reliably for months with zero issues. It was never the problem.
 
-Other useful native-integration signals:
+**The decision:** The native Tado HA integration adds `binary_sensor.hot_water_connectivity` at the cost of OAuth fragility and a whole extra set of advisory automations that can misbehave. Homebridge handles actuation cleanly. The trade-off isn't worth it.
 
-| Entity | Use |
-|---|---|
-| `binary_sensor.hot_water_connectivity` | Primary advisory trigger — zone-scoped, stable across BU01 replacements |
-| `binary_sensor.<IB-device>_connection_state` | Tado IB01 internet bridge online — distinguishes "BU01 only" from "all Tado dark" |
-| `binary_sensor.<BU-device>_connection_state` | Per-device BU01 (use the zone one above instead) |
-| `binary_sensor.hot_water_overlay` | Manual override active — informational, not actionable |
+**What you lose:** An early-warning signal when the BU01 goes dark before it affects heating.
+
+**What you gain:** An actuation and advisory layer that doesn't silently fail from OAuth expiry.
+
+**If you still want BU01 monitoring:** Run the external watchdog (`watchdog/`). It polls the ETH01's REST endpoint and Tado's cloud status directly — completely outside HA, completely outside the integration. That's a better monitoring path anyway, because it works when HA is exactly the thing that's broken.
 
 ---
 
@@ -358,13 +413,13 @@ tadoLocalHotWater/
 ├── README.md
 ├── LICENSE
 ├── esphome/
-│   └── hotwatertemp.yaml              # WT32-ETH01 firmware (globals, services, safety+survival lambda)
+│   └── hotwatertemp.yaml              # WT32-ETH01 firmware (globals, services, safety+survival lambda,
+│                                      #   bidirectional web UI controls added in v1.1)
 ├── homeassistant/
 │   ├── configuration.yaml.snippet     # input_select / boolean / number helpers
-│   ├── scripts.yaml                   # hot_water_on / hot_water_off wrappers
-│   └── automations.yaml               # heartbeat publisher, survival config publisher,
-│                                      #   safe-default-on-restart, advisory, unmanaged warning,
-│                                      #   refactoring template
+│   ├── scripts.yaml                   # hot_water_on (with pre-flight) / hot_water_off wrappers
+│   └── automations.yaml               # heartbeat publisher, survival config publisher (v1.1),
+│                                      #   safe-default-on-restart, refactoring template
 ├── observer/
 │   ├── observer.py                    # Snapshot writer for a homepage widget — NO actuation
 │   └── hot-water-observer.service     # systemd unit
@@ -393,9 +448,9 @@ tadoLocalHotWater/
 5. **Add the new automations** from `homeassistant/automations.yaml`.
 6. **Refactor your existing hot water automations** to call `script.hot_water_on/off` instead of toggling `switch.t_hot_water_boiler` directly. Look at the "REFACTORING TEMPLATE" comment block at the bottom of `automations.yaml`.
 7. **(Optional) Add the dashboard view** from `dashboard/lovelace-hot-water-view.yaml`.
-8. **(Optional, and you can happily skip this entirely)** Run the **observer** (`observer/`) for a status snapshot, and/or the **external watchdog** (`watchdog/`) for HA-independent push alerts. The three operating modes already give you the resilience; the watchdog is purely about being *told* when the rare combined-failure scenario happens. See "The 'HA dead + Tado still firing' gap" above for a discussion of where to host it (Docker container / separate Pi / VPS / etc.).
+8. **(Optional, and you can happily skip this entirely)** Run the **observer** (`observer/`) for a status snapshot, and/or the **external watchdog** (`watchdog/`) for HA-independent push alerts. The three operating modes already give you the resilience; the watchdog is purely about being *told* when the rare combined-failure scenario happens. See "The 'HA dead + Tado still firing' gap" above for a discussion of where to host it.
 
-Set up the native Tado HA integration alongside any existing Homebridge plugin — `binary_sensor.hot_water_connectivity` is required for the BU01-offline advisory.
+**Note on the native Tado HA integration:** v1.1 does **not** require it and recommends you don't install it. Homebridge handles actuation; the external watchdog handles monitoring. See the "Why it's excluded" section above.
 
 ---
 
@@ -403,18 +458,40 @@ Set up the native Tado HA integration alongside any existing Homebridge plugin �
 
 - **Don't mirror; mux.** An earlier draft had Tado → relay continuous mirroring. Two writers are always worse than one. An actuator selector + tiny wrapper scripts is much smaller code AND much more obvious during incidents.
 - **Survival mode is a service-preservation tool, not a comfort controller.** Resisting the urge to put occupancy, schedules, and usage-rate logic on the ESP kept the survival code under 60 lines and easy to reason about.
-- **Manual actuator selection beats auto-failover for v1.** You can always add the automation later; you can't undo a failover that flipped at the wrong moment.
+- **Manual actuator selection beats auto-failover for v1.** You can always add the automation later; you can't undo a failover that flipped at the wrong moment. The pre-flight check in `hot_water_on` is as far as auto-recovery should go.
 - **Hardware safety on the ESP regardless of mode.** Over-temp, max-on-time, sensor-bad must trip on the device, never delegated to HA. Lockout requires manual clear so a transient sensor blip doesn't oscillate the boiler.
+- **Check ALL actuator paths in your Turn-Off predicate.** The fail-safe only checked `switch.t_hot_water_boiler`. When `actuator = relay`, that switch is forced OFF, so the predicate was permanently false — the relay ran until the firmware watchdog hit. OR both paths. This is the kind of bug that sits undetected until the failure mode happens, and then it looks like a hardware fault.
 - **One external watchdog goes a long way.** ~90 lines of Python, slots into anything you already have running, gives you the only signal that survives HA dying.
+- **Don't run the native Tado HA integration if you only need one entity from it.** Homebridge handles the switch reliably. OAuth-based integrations add a fragile re-auth dependency that breaks silently. If you need BU01 monitoring, run the external watchdog instead — it polls the same information without the OAuth complexity.
+- **Add bidirectional sync to the ETH01 web UI early.** Read-only diagnostics are fine for a sensor node. Anything you might need to set from the boiler room (target temp, disable survival, kill automations) should be writable. It's ~20 lines of ESPHome and you'll be glad of it the first time HA is down and you need to change something from a browser on your phone.
 - **Wired Ethernet for the safety-critical ESP.** A few extra pounds, removes Wi-Fi as a failure mode entirely.
 
 ---
 
-## What's not in v1
+## What changed in v1.1
 
-- **Auto actuator-flip on Tado disconnect.** Manual selection only — auto-failover is a nightmare to debug when it fires unexpectedly. Will revisit after several weeks of stability data.
+> Released 2026-04-25. All changes in `esphome/`, `homeassistant/`, and `README.md`.
+
+**Bug fixes:**
+- **Turn-Off Fail-Safe predicate** now ORs both actuator paths: `is_state('switch.t_hot_water_boiler', 'on') or is_state('switch.hotwatertemp_hot_water_relay', 'on')`. The v1.0 predicate only checked the Homebridge path — when `actuator = relay`, the fail-safe never triggered and the relay ran until the firmware watchdog tripped. Three lockouts in 48 h traced to this single line.
+
+**New features:**
+- **ETH01 bidirectional web UI controls** — Target Temp (40–65 °C number), Automations Enabled (switch), Survival Allowed (switch). All three sync two-ways with their HA counterparts via a suppress-flag pattern. The ETH01 web UI (`http://<static-ip>/`) is now useful in a total HA outage.
+- **Survival thresholds auto-derived from target temp** — `low = max(target − 8, 38)`, `high = target`. No separate `input_number.hot_water_survival_low/high` helpers to configure or drift.
+- **Killswitch gates ETH01 survival** — `input_boolean.hot_water_automation_enabled = off` now also pushes `enabled: false` to ETH01 survival config. HA rebooting during an away period won't leave the ETH01 autonomously cycling the relay.
+- **Pre-flight Homebridge check in `hot_water_on`** — if `actuator = tado` but `switch.t_hot_water_boiler` is `unavailable` at the moment of heat demand, the script silently flips to relay, notifies you, and proceeds. Prevents cold water from a dead-Homebridge silent failure.
+
+**Removed:**
+- Native Tado HA integration dependency (`platform: tado`) — see "Why it's excluded" section.
+- `hot_water_tado_unavailable_advisory` automation.
+- `hot_water_unmanaged_scenario_warning` automation.
+
+---
+
+## What's not in v1.1
+
+- **Auto actuator-flip on Homebridge disconnect.** The pre-flight check in `hot_water_on` catches a dead path at the moment of heat demand; beyond that, switching is intentionally manual. Auto-failover is a nightmare to debug when it fires unexpectedly.
 - **Rich HA scheduling on the ESP in survival mode.** Out of scope and will stay out — if HA is down for long enough that it matters, fix HA.
-- **Survival thresholds slaved to live HA target.** Currently dedicated helpers; might revisit if it turns out the static band is too coarse in practice.
 
 ---
 
