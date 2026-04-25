@@ -1,20 +1,3 @@
-# tadoLocalHotWater — ETH01 firmware
-#
-# Wired-Ethernet ESP32 (WT32-ETH01) acting as:
-#   1. Hot water tank temperature sensor (DS18B20 in tank port)
-#   2. Parallel relay actuator across Tado BU01's HW-on terminal
-#   3. Local survival thermostat when HA heartbeat goes stale
-#
-# Three operating modes — see project README for the full design.
-#
-# BEFORE FLASHING:
-#   - Replace api.encryption.key  with one generated for your install
-#       (HA: Settings → Devices → ESPHome → ⋯ → Add encryption key)
-#   - Replace ota.password        with your own
-#   - Replace static_ip / gateway / dns with your network
-#   - Optional: change the heartbeat staleness threshold in the lambda below
-#     (default 15 min) and the survival low/high band
-
 esphome:
   name: hotwatertemp
   friendly_name: HotWaterTemp
@@ -26,7 +9,7 @@ esp32:
   framework:
     type: arduino
 
-# WT32-ETH01 v1.4 ethernet
+# Ethernet configuration for WT32-ETH01 v1.4
 ethernet:
   type: LAN8720
   mdc_pin: GPIO23
@@ -38,25 +21,22 @@ ethernet:
   power_pin: GPIO16
 
   manual_ip:
-    static_ip: 192.168.1.X
+    static_ip: 192.168.1.104
     gateway: 192.168.1.1
     subnet: 255.255.255.0
     dns1: 192.168.1.1
     dns2: 8.8.8.8
 
-# Local REST + status page (the external watchdog reads /sensor/hotwatertemp32 from this)
+# Web server for local REST API access (fallback monitor)
 web_server:
   port: 80
   local: true
 
-# DS18B20 in the tank's temperature port — single sensor on a one-wire bus
+# DS18B20 one-wire bus
 one_wire:
   - platform: gpio
     pin: GPIO4
 
-# ============================================================================
-# GLOBALS — survival thresholds + relay state tracking
-# ============================================================================
 globals:
   - id: ha_heartbeat_ms
     type: uint32_t
@@ -77,11 +57,11 @@ globals:
   - id: max_safe_temp
     type: float
     restore_value: yes
-    initial_value: '65.0'   # MUST be above any legionella target
+    initial_value: '65.0'
   - id: max_on_seconds
     type: uint32_t
     restore_value: yes
-    initial_value: '5400'   # 90 min default
+    initial_value: '5400'
   - id: relay_on_since_ms
     type: uint32_t
     restore_value: no
@@ -94,19 +74,37 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  # Suppress flags — set to true while HA-driven changes propagate down to the
+  # local mirrors, so the on_value/on_turn handlers don't echo the change back
+  # to HA and create a loop.
+  - id: suppress_target_push
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: suppress_killswitch_push
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: suppress_survival_push
+    type: bool
+    restore_value: no
+    initial_value: 'false'
 
 sensor:
+  # Hot water tank temperature (Dallas DS18B20)
   - platform: dallas_temp
     name: "hotwatertemp32"
     id: hotwatertemp32
     accuracy_decimals: 1
     update_interval: 30s
 
+  # Uptime for diagnostics
   - platform: uptime
     type: seconds
     name: "Uptime"
     id: uptime_sensor
 
+  # Free heap memory (simple template using ESP.getFreeHeap)
   - platform: template
     name: "Free Heap"
     id: free_heap
@@ -115,7 +113,7 @@ sensor:
     unit_of_measurement: "bytes"
     entity_category: diagnostic
 
-  # Effective survival thresholds exposed to HA for visibility
+  # Effective survival thresholds (exposed for visibility)
   - platform: template
     name: "Hot Water Fallback Low"
     lambda: 'return id(fallback_low_temp);'
@@ -138,6 +136,7 @@ sensor:
     accuracy_decimals: 1
     entity_category: diagnostic
 
+  # Debug sensors (from ESPHome debug component)
   - platform: debug
     free:
       name: "ESP Heap Free"
@@ -145,6 +144,22 @@ sensor:
       name: "ESP Heap Max Block"
     loop_time:
       name: "ESP Loop Time"
+
+  # Subscribe to HA's user-facing target temp. When HA changes it (knob commit,
+  # dashboard slider, automation), mirror the value into target_temp_local
+  # without echoing it back.
+  - platform: homeassistant
+    entity_id: input_number.target_temp
+    id: ha_target_subscriber
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            id(suppress_target_push) = true;
+            auto call = id(target_temp_local).make_call();
+            call.set_value(x);
+            call.perform();
+            id(suppress_target_push) = false;
 
 binary_sensor:
   - platform: template
@@ -165,22 +180,45 @@ binary_sensor:
     name: "Hot Water Watchdog Lockout"
     lambda: 'return id(watchdog_lockout);'
 
+  # Subscribe to HA's master killswitch ("Automations Enabled"). When HA flips
+  # it, mirror onto the local switch without echoing back.
+  - platform: homeassistant
+    entity_id: input_boolean.hot_water_automation_enabled
+    id: ha_killswitch_sub
+    internal: true
+    on_state:
+      then:
+        - lambda: |-
+            id(suppress_killswitch_push) = true;
+            if (x) id(automations_enabled).turn_on();
+            else id(automations_enabled).turn_off();
+            id(suppress_killswitch_push) = false;
+
+  # Subscribe to HA's "Survival Allowed" toggle.
+  - platform: homeassistant
+    entity_id: input_boolean.hot_water_survival_enabled
+    id: ha_survival_sub
+    internal: true
+    on_state:
+      then:
+        - lambda: |-
+            id(suppress_survival_push) = true;
+            if (x) id(survival_allowed).turn_on();
+            else id(survival_allowed).turn_off();
+            id(suppress_survival_push) = false;
+
+# Text sensors from debug (reset reason etc.)
 text_sensor:
   - platform: debug
     reset_reason:
       name: "ESP Reset Reason"
 
-# ============================================================================
-# RELAY — wired in PARALLEL with the Tado BU01's hot water on terminal
-#         (relay COM–NO across the BU01's dry contacts)
-# Either path closing fires the boiler; both must be open to keep it off.
-# ============================================================================
 switch:
   - platform: gpio
     pin: GPIO14
     name: "Hot Water Relay"
     id: hot_water_relay
-    restore_mode: ALWAYS_OFF   # NEVER on at boot — critical safety default
+    restore_mode: ALWAYS_OFF
     on_turn_on:
       - lambda: |-
           id(relay_on_since_ms) = millis();
@@ -190,6 +228,84 @@ switch:
           id(relay_off_since_ms) = millis();
           id(relay_on_since_ms) = 0;
 
+  # Local mirror of input_boolean.hot_water_automation_enabled. Toggling here
+  # propagates to HA; HA-side flips arrive via ha_killswitch_sub above.
+  - platform: template
+    name: "Automations Enabled"
+    id: automations_enabled
+    icon: "mdi:cog-outline"
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    turn_on_action:
+      - if:
+          condition:
+            lambda: 'return !id(suppress_killswitch_push);'
+          then:
+            - homeassistant.service:
+                service: input_boolean.turn_on
+                data:
+                  entity_id: input_boolean.hot_water_automation_enabled
+    turn_off_action:
+      - if:
+          condition:
+            lambda: 'return !id(suppress_killswitch_push);'
+          then:
+            - homeassistant.service:
+                service: input_boolean.turn_off
+                data:
+                  entity_id: input_boolean.hot_water_automation_enabled
+
+  # Local mirror of input_boolean.hot_water_survival_enabled.
+  - platform: template
+    name: "Survival Allowed"
+    id: survival_allowed
+    icon: "mdi:lifebuoy"
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    turn_on_action:
+      - if:
+          condition:
+            lambda: 'return !id(suppress_survival_push);'
+          then:
+            - homeassistant.service:
+                service: input_boolean.turn_on
+                data:
+                  entity_id: input_boolean.hot_water_survival_enabled
+    turn_off_action:
+      - if:
+          condition:
+            lambda: 'return !id(suppress_survival_push);'
+          then:
+            - homeassistant.service:
+                service: input_boolean.turn_off
+                data:
+                  entity_id: input_boolean.hot_water_survival_enabled
+
+# Writable target-temp mirror. The web UI slider edits this; on_value pushes
+# the change up to HA's input_number.target_temp (unless suppressed by the
+# subscriber that just received an HA-driven update).
+number:
+  - platform: template
+    name: "Target Temp"
+    id: target_temp_local
+    icon: "mdi:thermometer"
+    min_value: 40
+    max_value: 65
+    step: 1
+    optimistic: true
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(suppress_target_push);'
+            then:
+              - homeassistant.service:
+                  service: input_number.set_value
+                  data:
+                    entity_id: input_number.target_temp
+                    value: !lambda 'return x;'
+
+# Buttons: restart + clear watchdog lockout
 button:
   - platform: restart
     name: "Restart"
@@ -200,11 +316,7 @@ button:
     on_press:
       - lambda: 'id(watchdog_lockout) = false;'
 
-# ============================================================================
-# SAFETY + SURVIVAL LOOP
-# Runs every 30s. Hard safety always on; survival logic only kicks in when
-# HA heartbeat has been stale for ≥15 min.
-# ============================================================================
+# Single safety + survival loop (runs every 30s)
 interval:
   - interval: 30s
     then:
@@ -213,7 +325,7 @@ interval:
           const float t = id(hotwatertemp32).state;
           const bool sensor_bad = isnan(t);
 
-          // ---- HARD SAFETY (always active) ----
+          // ---- HARD SAFETY (always) ----
           if (!sensor_bad && t >= id(max_safe_temp)) {
             if (id(hot_water_relay).state) {
               ESP_LOGW("hw_safety", "Over-temp %.1f >= %.1f -> OFF + lockout",
@@ -254,7 +366,7 @@ interval:
           }
           if (sensor_bad) return;
 
-          const uint32_t SURVIVAL_MIN_OFF_S = 180;     // 3 min anti-chatter
+          const uint32_t SURVIVAL_MIN_OFF_S = 180;  // 3 min anti-chatter
           const float critical_low = id(fallback_low_temp) - 3.0f;
 
           if (!id(hot_water_relay).state) {
@@ -274,21 +386,19 @@ interval:
             }
           }
 
+# Reduced logging - saves memory and noise
 logger:
   level: WARN
 
-# ============================================================================
-# HA API + services for HA → ETH01 control
-# ============================================================================
+# Home Assistant API — with services for heartbeat + survival config
 api:
   encryption:
-    key: "REPLACE_WITH_YOUR_OWN_BASE64_KEY=="
-  reboot_timeout: 0s     # MUST be 0 — survival mode requires the device to keep running when HA disappears
+    key: "U23/jEthsNVcwd+sS6pj249MZEOQQRgHvcVBHdtlvu0="
+  reboot_timeout: 0s
   services:
     - service: ha_heartbeat
       then:
         - lambda: 'id(ha_heartbeat_ms) = millis();'
-
     - service: set_survival_config
       variables:
         enabled: bool
@@ -298,7 +408,7 @@ api:
         max_on_s: int
       then:
         - lambda: |-
-            // Defensive validation — clamp to safe bounds, never reject so survival
+            // Defensive validation — clamp to safe bounds, never reject outright so survival
             // always has usable thresholds. Log every coercion.
             auto finite = [](float v){ return !isnan(v) && !isinf(v); };
             float lo = finite(low_temp)  ? low_temp  : 38.0f;
@@ -331,14 +441,14 @@ api:
             ESP_LOGI("hw_cfg",
               "Survival config applied: enabled=%d low=%.1f high=%.1f max=%.1f max_on=%d",
               (int)enabled, lo, hi, mx, mo);
-
     - service: clear_watchdog_lockout
       then:
         - lambda: 'id(watchdog_lockout) = false;'
 
 ota:
   - platform: esphome
-    password: "REPLACE_WITH_YOUR_OWN_OTA_PASSWORD"
+    password: "7c209d6258e56f86393b5d137a74c663"
 
+# Optional: keep this while you still care about reset reason / loop time
 debug:
   update_interval: 10s
