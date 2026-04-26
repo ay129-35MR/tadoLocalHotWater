@@ -472,6 +472,16 @@ tadoLocalHotWater/
 
 > Released 2026-04-25. All changes in `esphome/`, `homeassistant/`, and `README.md`.
 
+**Proper PCB**
+For anything to do with 240V and water, safety and robustness are key, and duff soldering and dupont connectors wont cut it. I am working on a proper PCB which will be the motherboard for the relay, HLK power supply, WT32-ETH01 (including a cutout for the RJ45 jack), a proper terminal block for the DS18B20 temperature sensor, and also an expansion block to allow use of the remaining free GPIOs for future projects.  watch this space:
+
+<p align="center">
+  <img src="images/PCB Design.jpeg" width="300" height="300">
+  <img src="images/PCB Design 2.jpeg" width="300" height="300">
+  <img src="images/PCB Design 3.jpeg" width="300" height="300">
+</p>
+
+
 **Bug fixes:**
 - **Turn-Off Fail-Safe predicate** now ORs both actuator paths: `is_state('switch.t_hot_water_boiler', 'on') or is_state('switch.hotwatertemp_hot_water_relay', 'on')`. The v1.0 predicate only checked the Homebridge path — when `actuator = relay`, the fail-safe never triggered and the relay ran until the firmware watchdog tripped. Three lockouts in 48 h traced to this single line.
 
@@ -480,6 +490,8 @@ tadoLocalHotWater/
 - **Survival thresholds auto-derived from target temp** — `low = max(target − 8, 38)`, `high = target`. No separate `input_number.hot_water_survival_low/high` helpers to configure or drift.
 - **Killswitch gates ETH01 survival** — `input_boolean.hot_water_automation_enabled = off` now also pushes `enabled: false` to ETH01 survival config. HA rebooting during an away period won't leave the ETH01 autonomously cycling the relay.
 - **Pre-flight Homebridge check in `hot_water_on`** — if `actuator = tado` but `switch.t_hot_water_boiler` is `unavailable` at the moment of heat demand, the script silently flips to relay, notifies you, and proceeds. Prevents cold water from a dead-Homebridge silent failure.
+
+
 
 **Removed:**
 - Native Tado HA integration dependency (`platform: tado`) — see "Why it's excluded" section.
