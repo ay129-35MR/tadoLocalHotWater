@@ -7,7 +7,7 @@
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/ay129)
 [![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/donate?business=nyashachipanga%40yahoo.com&currency_code=GBP)
 
-A small, low-cost project that gives a Tado-controlled hot water system three layers of fallback so the tank doesn't go cold when **Tado's BU01**, **Tado's cloud**, **Home Assistant**, or **the network** drops. Companion project to [tadoHotWaterKnob](https://github.com/ay129-35MR/tadoHotWaterKnob) — same household, complementary problem.
+A small, low-cost project that gives a Home Assistant and Tado-controlled hot water system three layers of fallback so the hot water tank doesn't go cold when **Tado's BU01**, **Tado's cloud**, **Home Assistant**, or **the network** drops. Companion project to [tadoHotWaterKnob](https://github.com/ay129-35MR/tadoHotWaterKnob) — same household, complementary problem.
 
 <p align="center">
   <img src="images/01-enclosure-overview.png" alt="Annotated enclosure: ESP32 + relay + Hi-Link AC-DC + DS18B20, with AC input, ethernet out, relay control (logic), and relay output (to Tado Z) labelled" width="420">
@@ -37,7 +37,7 @@ This project is a small bet against that. It puts a **wired, local, vendor-neutr
 
 - The boiler's HW-call terminals get a second pair of wires from a cheap ESP32 relay running [ESPHome](https://esphome.io/) — open source firmware, no cloud, no account required.
 - Decisions are made by [Home Assistant](https://www.home-assistant.io/) — open source, runs on your hardware, no cloud dependency.
-- If even Home Assistant goes dark, the ESP32 itself takes over with a tiny survival thermostat — keeping the water usable until you get back to fix things.
+- If even Home Assistant goes dark, the ESP32 itself takes over with a tiny survival thermostat — keeping the water usable until you get back to fix things.    Because the ESP32 (more accurately the WT32-ETH01) has both the temperature sensor and the actuator, it can carry and execute the same hot water logic as Home Assistant and Tado currently do, all onboard the device itself.  It can be interrogated even if home wifi goes down via its fallback hotspot.  Should my old tado system die and spares are no longer available, I have 99% of the bones to just do without it and switch over to this system.  
 
 Tado keeps doing what it does well — comfort, scheduling, app polish. We just refuse to let it be the *only* path. If Tado vanishes tomorrow the way Nest did in 2019, the boiler still fires, the water still heats, and the only thing you lose is the app.
 
@@ -85,9 +85,9 @@ The actuation side is intentionally simple: a single relay wired in parallel wit
 
 ### Where this build started — the sensor-only predecessor
 
-Before the relay path existed, the same enclosure was built out as a **read-only** ESPHome node: just a WT32-ETH01, a 5 V supply, and a DS18B20 probe dropped into the tank's temperature pocket. Its only job was to publish tank temperature into Home Assistant so we could see what Tado was *actually* doing to the cylinder — a trust-but-verify layer on top of the cloud integration, and the companion to [tadoHotWaterKnob](https://github.com/ay129-35MR/tadoHotWaterKnob).
+Before the relay path existed, the same enclosure was built out as a **read-only** ESPHome node: just a WT32-ETH01, a 5 V supply, and a DS18B20 probe dropped into the tank's temperature pocket. Its only job was to publish tank temperature into Home Assistant so we could see what Tado was *actually* doing to the cylinder — then getting HA automations to fire boiler hot water on/off commands via the Tado cloud integration, and the companion to [tadoHotWaterKnob](https://github.com/ay129-35MR/tadoHotWaterKnob).
 
-That earlier build is what the v1 you're looking at grew out of: same enclosure, same ESP32, same probe, same wiring for rows 9–11 of the connections table below. All that was added was a relay module and the cable run from COM/NO to the BU01. If you're retrofitting an existing sensor-only install, you already have 80 % of the hardware and most of the cable routing work done.
+That earlier build is what the v1 you're looking at grew out of: same enclosure, same ESP32, same probe, same wiring for rows 9–11 of the connections table below. All that was added was a relay module and the cable run from COM/NO to the BU01.  The key here is to have our own tado -independent, and also Home Assistant Independent switch for calling for hot water from the boiler should either Tado or HA die.  Because the ETH01 has both the temperature sensor and the actuator, it can carry and execute the same hot water logic as Home Assistant and Tado currently do. all onboard the device itself.  Honestly, should my old tado system die I have 99% of the bones to just do without it and switch over to this system.    If you're retrofitting an existing sensor-only install, you already have 80 % of the hardware and most of the cable routing work done.
 
 <p align="center">
   <img src="images/00a-predecessor-open.jpg" alt="The original sensor-only enclosure, open, showing the WT32-ETH01 dev board, 5 V supply, and DS18B20 probe on a long cable — no relay module yet" width="420">
@@ -110,7 +110,7 @@ That earlier build is what the v1 you're looking at grew out of: same enclosure,
 | **DS18B20** in a stainless probe with the standard 4.7 kΩ pull-up | ~£2 | Dropped into the tank's existing temperature port (most cylinders have one). |
 | **3-core cable** between the ETH01 and the boiler (relay sits at the boiler end) | <£1 | COM + NO + GND. |
 | **Pluggable terminal blocks** for the BU01 dry contacts | <£1 | Avoids cutting into the BU01 itself. |
-| **5 V USB power supply** for the ETH01 | ~£3 | Feed it from the same circuit as the BU01 if possible. |
+| **5 V HLK power supply** for the ETH01 | ~£3 | Feed it AC from the same circuit as the BU01 if possible. |
 | Total | **~£15** | Tado kit is unchanged. |
 
 ### Wiring — the parallel path
